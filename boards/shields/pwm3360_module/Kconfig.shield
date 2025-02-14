@@ -1,0 +1,11 @@
+# Copyright (c) 2025 George Norton
+# SPDX-License-Identifier: MIT
+
+config SHIELD_PMW3360_MODULE
+	def_bool $(shields_list_contains,pmw3360_module)
+	imply ZMK_MOUSE
+	select pinctrl
+	select GPIO
+	select INPUT
+	select SPI
+

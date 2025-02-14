@@ -1,0 +1,14 @@
+# Copyright (c) 2025 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+#
+# PMW3360 optical mouse sensor driver
+
+menuconfig INPUT_PIXART_PMW3360
+    bool "PMW3360 optical mouse sensor"
+    default y
+    depends on GPIO
+    depends on SPI
+    depends on INPUT
+    depends on DT_HAS_PIXART_PMW3360_ENABLED
+    help
+      Enable PMW3360 optical mouse sensor.

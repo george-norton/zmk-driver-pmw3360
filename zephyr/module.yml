@@ -1,0 +1,8 @@
+
+name: pmw3360-zephyr-module
+build:
+  cmake: .
+  kconfig: Kconfig
+  settings:
+    board_root: .
+    dts_root: .

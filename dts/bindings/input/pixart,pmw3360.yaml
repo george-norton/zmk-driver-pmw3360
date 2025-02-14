@@ -1,0 +1,17 @@
+# Copyright (c) 2025 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+description: |
+  Sensor driver for the pixart PMW3360 optical mouse sensor 
+
+compatible: "pixart,pmw3360"
+
+include: spi-device.yaml
+
+properties:
+  irq-gpios:
+    type: phandle-array
+    required: true
+  cpi:
+    type: int
+    default: 600
+    description: "CPI value (Range: 50 - 8200)"

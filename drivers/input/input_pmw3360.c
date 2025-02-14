@@ -1,0 +1,305 @@
+/*
+ * Copyright (c) 2025 The ZMK Contributors
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#define DT_DRV_COMPAT pixart_pmw3360
+
+#include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/input/input.h>
+#include <zephyr/logging/log.h>
+#include "input_pmw3360.h"
+
+LOG_MODULE_REGISTER(pmw3360, CONFIG_INPUT_LOG_LEVEL);
+
+// Indicates the direction of a SPI transaction
+#define PMW3360_SPI_READ 0
+#define PMW3360_SPI_WRITE 0x80
+
+// Timing values from the datasheet
+#define PMW3360_T_SRAD 160
+#define PMW3360_T_SCLK_NCS_READ 120
+#define PMW3360_T_SCLK_NCS_WRITE 35
+#define PMW3360_T_SRR 20  // Same as T_SRW
+#define PMW3360_T_SWR 180 // Same as T_SWW
+
+// Select register addresses
+#define PMW3360_REG_PRODUCT_ID      0x00
+#define PMW3360_REG_REVISION_ID     0x01
+#define PMW3360_REG_MOTION          0x02
+#define PMW3360_REG_DELTA_X_L       0x03
+#define PMW3360_REG_DELTA_X_H       0x04
+#define PMW3360_REG_DELTA_Y_L       0x05
+#define PMW3360_REG_DELTA_Y_H       0x06
+
+#define PMW3360_REG_CONFIG_1        0x0F
+#define PMW3360_REG_CONFIG_2        0x10
+#define PMW3360_REG_ANGLE_TUNE      0x11
+#define PMW3360_REG_LIFT_CONFIG     0x63
+
+static int pmw3360_set_interrupt(const struct device *dev, const bool en) {
+    const struct pmw3360_config *config = dev->config;
+    int ret = gpio_pin_interrupt_configure_dt(&config->irq_gpio,
+                                              en ? GPIO_INT_LEVEL_ACTIVE : GPIO_INT_DISABLE);
+    if (ret < 0) {
+        LOG_ERR("can't set interrupt");
+    }
+    return ret;
+}
+
+static int pmw3360_spi_read(const struct device *dev, const uint8_t addr, uint8_t *buf, const uint8_t len) {
+    const struct pmw3360_config *config = dev->config;
+    uint8_t tx_buffer[1] = { PMW3360_SPI_READ | addr };
+
+    // Send the address to read from
+    const struct spi_buf tx_buf[1] = {
+        {
+        .buf = tx_buffer,
+        .len = 1,
+        }
+    };
+    const struct spi_buf_set tx = {
+        .buffers = tx_buf,
+        .count = 1,
+    };
+    
+    int ret = spi_write_dt(&config->spi, &tx);
+    if (ret < 0) {
+        LOG_ERR("Error writing the SPI read-address: %d", ret);
+        spi_release_dt(&config->spi);
+        return ret;
+    }
+
+    // Wait before reading the data, having send the address
+    k_usleep(PMW3360_T_SRAD);
+
+    // Read the data
+    struct spi_buf rx_buf[1] = {
+        {
+        .buf = buf,
+        .len = len,
+        },
+    };
+    const struct spi_buf_set rx = {
+        .buffers = rx_buf,
+        .count = 1,
+    };
+    ret = spi_read_dt(&config->spi, &rx);
+    if (ret != 0) {
+        LOG_ERR("Error reading the SPI payload: %d", ret);
+        spi_release_dt(&config->spi);
+        return ret;
+    }
+
+    // Wait before releasing the NCS pin
+    k_usleep(PMW3360_T_SCLK_NCS_READ);
+
+    spi_release_dt(&config->spi);
+
+    // Wait before we issue another read/write
+    k_usleep(PMW3360_T_SRR);
+
+    return ret;
+}
+
+
+static int pmw3360_spi_write(const struct device *dev, const uint8_t addr, const uint8_t val) {
+    const struct pmw3360_config *config = dev->config;
+
+    // Send the address and payload, read into a dummy buffer
+    uint8_t tx_buffer[2] = {PMW3360_SPI_WRITE | addr, val};
+    uint8_t rx_buffer[2] = {};
+
+    const struct spi_buf tx_buf = {
+        .buf = tx_buffer,
+        .len = 2,
+    };
+    const struct spi_buf_set tx = {
+        .buffers = &tx_buf,
+        .count = 1,
+    };
+
+    const struct spi_buf rx_buf = {
+        .buf = rx_buffer,
+        .len = 2,
+    };
+    const struct spi_buf_set rx = {
+        .buffers = &rx_buf,
+        .count = 1,
+    };
+
+    const int ret = spi_transceive_dt(&config->spi, &tx, &rx);
+    if (ret < 0) {
+        LOG_ERR("spi ret: %d", ret);
+    }
+
+    // Wait before releasing the NCS pin
+    k_usleep(PMW3360_T_SCLK_NCS_WRITE);
+
+    spi_release_dt(&config->spi);
+
+    // Wait before we issue another read/write
+    k_usleep(PMW3360_T_SWR);
+
+    return ret;
+}
+
+static void pmw3360_gpio_callback(const struct device *gpiob, struct gpio_callback *cb, uint32_t pins) {
+    struct pmw3360_data *data = CONTAINER_OF(cb, struct pmw3360_data, irq_gpio_cb);
+    const struct device *dev = data->dev;
+    pmw3360_set_interrupt(dev, false);
+    k_work_submit(&data->trigger_work);
+}
+
+static int pmw3360_init_irq(const struct device *dev) {
+    int err;
+    struct pmw3360_data *data = dev->data;
+    const struct pmw3360_config *config = dev->config;
+
+    // check readiness of irq gpio pin
+    if (!device_is_ready(config->irq_gpio.port)) {
+        LOG_ERR("IRQ GPIO device not ready");
+        return -ENODEV;
+    }
+
+    // init the irq pin
+    err = gpio_pin_configure_dt(&config->irq_gpio, GPIO_INPUT);
+    if (err) {
+        LOG_ERR("Cannot configure IRQ GPIO");
+        return err;
+    }
+
+    // setup and add the irq callback associated
+    err = gpio_pin_configure_dt(&config->irq_gpio, GPIO_INPUT);
+    if (err) {
+        LOG_ERR("Failed to configure IRQ pin");
+    }
+    gpio_init_callback(&data->irq_gpio_cb, pmw3360_gpio_callback, BIT(config->irq_gpio.pin));
+    err = gpio_add_callback(config->irq_gpio.port, &data->irq_gpio_cb);
+    if (err) {
+        LOG_ERR("Cannot add IRQ GPIO callback");
+    }
+
+    return err;
+}
+
+static void pmw3360_work_callback(struct k_work *work) {
+    struct pmw3360_data *data = CONTAINER_OF(work, struct pmw3360_data, trigger_work);
+    const struct device *dev = data->dev;
+
+    uint8_t motion = 0;
+    pmw3360_spi_write(dev, PMW3360_REG_MOTION, 1);
+    pmw3360_spi_read(dev, PMW3360_REG_MOTION, &motion, 1);
+
+    uint8_t dx_l = 0;
+    uint8_t dx_h = 0;
+    pmw3360_spi_read(dev, PMW3360_REG_DELTA_X_L, &dx_l, 1);
+    pmw3360_spi_read(dev, PMW3360_REG_DELTA_X_H, &dx_h, 1);
+
+    int dx = (dx_h << 8) | dx_l;
+    input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
+
+    uint8_t dy_l = 0;
+    uint8_t dy_h = 0;
+    pmw3360_spi_read(dev, PMW3360_REG_DELTA_Y_L, &dy_l, 1);
+    pmw3360_spi_read(dev, PMW3360_REG_DELTA_Y_H, &dy_h, 1);
+
+    int dy = (dy_h << 8) | dy_l;
+    input_report_rel(dev, INPUT_REL_Y, dy, true, K_FOREVER);
+
+    pmw3360_set_interrupt(dev, true);
+}
+
+static void pmw3360_async_init(struct k_work *work) {
+    struct k_work_delayable *work_delayable = (struct k_work_delayable *)work;
+    struct pmw3360_data *data = CONTAINER_OF(work_delayable, struct pmw3360_data, init_work);
+    const struct device *dev = data->dev;
+    const struct pmw3360_config *config = dev->config;
+
+    k_work_init(&data->trigger_work, pmw3360_work_callback);
+    pmw3360_init_irq(dev);
+
+    // Power up sequence.
+    // Step 2: drive the NCS high, then low to reset the SPI port.
+    gpio_pin_set_dt(&config->cs_gpio, GPIO_OUTPUT_ACTIVE);
+    k_msleep(40); 
+    gpio_pin_set_dt(&config->cs_gpio, GPIO_OUTPUT_INACTIVE);
+
+    // Step 3: write 0x5A to the Power_Up_Reset register
+    pmw3360_spi_write(dev, 0x3A, 0x5A);
+
+    // Step 4: wait for at least 50ms
+    k_msleep(50); 
+
+    // Step 5: read the registers 2, 3, 4, 5 and 6
+    for (int r=2; r<=6; r++) {
+        uint8_t value = 0;
+        pmw3360_spi_read(dev, r, &value, 1);
+    }
+
+    // Step 6: download the SROM. We will skip this.
+    // Step 7: configure the sensor.
+
+    uint8_t product_id = 0;
+    int r1 = pmw3360_spi_read(dev, PMW3360_REG_PRODUCT_ID, &product_id, 1);
+
+    uint8_t revision_id = 0;
+    int r2 = pmw3360_spi_read(dev, PMW3360_REG_REVISION_ID, &revision_id, 1);
+
+    LOG_ERR("pmw3360 product %d (%d), resivion %d (%d)", product_id, r1, revision_id, r2);
+
+    pmw3360_spi_write(dev, PMW3360_REG_CONFIG_1, 0x07);
+    pmw3360_spi_write(dev, PMW3360_REG_CONFIG_2, 0x20);
+    pmw3360_spi_write(dev, PMW3360_REG_ANGLE_TUNE, 0x00);
+    pmw3360_spi_write(dev, PMW3360_REG_LIFT_CONFIG, 0x02);
+
+    pmw3360_set_interrupt(dev, true);
+}
+
+static int pmw3360_init(const struct device *dev) {
+    struct pmw3360_data *data = dev->data;
+    const struct pmw3360_config *config = dev->config;
+    data->dev = dev;
+
+    k_work_init_delayable(&data->init_work, pmw3360_async_init);
+    // How much delay do we need? K_NO_WAIT ? Some delay seems required or we dont get logging.
+    k_work_schedule(&data->init_work, K_MSEC(1000));
+
+    return 0;
+}
+
+static int pmw3360_attr_set(const struct device *dev, enum sensor_channel chan, enum sensor_attribute attr, const struct sensor_value *val) {
+    struct pmw3360_data *data = dev->data;
+
+    if (unlikely(chan != SENSOR_CHAN_ALL)) {
+        return -ENOTSUP;
+    }
+
+    if (unlikely(!data->ready)) {
+        LOG_ERR("Device is not initialized yet");
+        return -EBUSY;
+    }
+
+    return 0;
+}
+
+static const struct sensor_driver_api pmw3360_driver_api = {
+    .attr_set = pmw3360_attr_set,
+};
+
+#define PMW3360_SPI_MODE (SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_TRANSFER_MSB | SPI_HOLD_ON_CS | SPI_LOCK_ON)
+
+#define PMW3360_DEFINE(n)                                                                          \
+    static struct pmw3360_data data##n;                                                            \
+    static const struct pmw3360_config config##n = {                                               \
+        .spi = SPI_DT_SPEC_INST_GET(n, PMW3360_SPI_MODE, 0),                                       \
+        .cs_gpio = SPI_CS_GPIOS_DT_SPEC_GET(DT_DRV_INST(n)),                                       \
+        .irq_gpio = GPIO_DT_SPEC_INST_GET(n, irq_gpios),                                           \
+        .cpi = DT_PROP(DT_DRV_INST(n), cpi),                                                       \
+    };                                                                                             \
+    DEVICE_DT_INST_DEFINE(n, pmw3360_init, NULL, &data##n, &config##n, POST_KERNEL,                \
+        CONFIG_INPUT_INIT_PRIORITY, &pmw3360_driver_api);
+
+DT_INST_FOREACH_STATUS_OKAY(PMW3360_DEFINE)
