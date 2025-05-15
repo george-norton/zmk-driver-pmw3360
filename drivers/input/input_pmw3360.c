@@ -24,6 +24,7 @@ LOG_MODULE_REGISTER(pmw3360, CONFIG_INPUT_LOG_LEVEL);
 #define PMW3360_T_SCLK_NCS_WRITE 35
 #define PMW3360_T_SRR 20  // Same as T_SRW
 #define PMW3360_T_SWR 180 // Same as T_SWW
+#define PMW3360_T_SRAD_MOTBR 35
 
 // Select register addresses
 #define PMW3360_REG_PRODUCT_ID      0x00
@@ -37,19 +38,30 @@ LOG_MODULE_REGISTER(pmw3360, CONFIG_INPUT_LOG_LEVEL);
 #define PMW3360_REG_CONFIG_1        0x0F
 #define PMW3360_REG_CONFIG_2        0x10
 #define PMW3360_REG_ANGLE_TUNE      0x11
+#define PMW3360_REG_POWER_UP        0x3A
+#define PMW3360_REG_MOTION_BURST    0x50
 #define PMW3360_REG_LIFT_CONFIG     0x63
+
+struct motion_burst {
+    uint8_t motion;
+    uint8_t observation;
+    uint8_t delta_x_l;
+    uint8_t delta_x_h;
+    uint8_t delta_y_l;
+    uint8_t delta_y_h;
+} __packed;
 
 static int pmw3360_set_interrupt(const struct device *dev, const bool en) {
     const struct pmw3360_config *config = dev->config;
-    int ret = gpio_pin_interrupt_configure_dt(&config->irq_gpio,
+    int err = gpio_pin_interrupt_configure_dt(&config->irq_gpio,
                                               en ? GPIO_INT_LEVEL_ACTIVE : GPIO_INT_DISABLE);
-    if (ret < 0) {
+    if (err < 0) {
         LOG_ERR("can't set interrupt");
     }
-    return ret;
+    return err;
 }
 
-static int pmw3360_spi_read(const struct device *dev, const uint8_t addr, uint8_t *buf, const uint8_t len) {
+static int pmw3360_spi_read(const struct device *dev, const uint8_t addr, uint8_t *buf, const uint8_t len, const int32_t address_wait) {
     const struct pmw3360_config *config = dev->config;
     uint8_t tx_buffer[1] = { PMW3360_SPI_READ | addr };
 
@@ -65,15 +77,15 @@ static int pmw3360_spi_read(const struct device *dev, const uint8_t addr, uint8_
         .count = 1,
     };
     
-    int ret = spi_write_dt(&config->spi, &tx);
-    if (ret < 0) {
-        LOG_ERR("Error writing the SPI read-address: %d", ret);
+    int err = spi_write_dt(&config->spi, &tx);
+    if (err < 0) {
+        LOG_ERR("Error writing the SPI read-address: %d", err);
         spi_release_dt(&config->spi);
-        return ret;
+        return err;
     }
 
-    // Wait before reading the data, having send the address
-    k_usleep(PMW3360_T_SRAD);
+    // Wait before reading the data, having sent the address
+    k_usleep(address_wait);
 
     // Read the data
     struct spi_buf rx_buf[1] = {
@@ -86,11 +98,11 @@ static int pmw3360_spi_read(const struct device *dev, const uint8_t addr, uint8_
         .buffers = rx_buf,
         .count = 1,
     };
-    ret = spi_read_dt(&config->spi, &rx);
-    if (ret != 0) {
-        LOG_ERR("Error reading the SPI payload: %d", ret);
+    err = spi_read_dt(&config->spi, &rx);
+    if (err != 0) {
+        LOG_ERR("Error reading the SPI payload: %d", err);
         spi_release_dt(&config->spi);
-        return ret;
+        return err;
     }
 
     // Wait before releasing the NCS pin
@@ -98,15 +110,14 @@ static int pmw3360_spi_read(const struct device *dev, const uint8_t addr, uint8_
 
     spi_release_dt(&config->spi);
 
-    // Wait before we issue another read/write
-    k_usleep(PMW3360_T_SRR);
-
-    return ret;
+    return err;
 }
 
-
-static int pmw3360_spi_write(const struct device *dev, const uint8_t addr, const uint8_t val) {
+static int pmw3360_spi_write_reg(const struct device *dev, const uint8_t addr, const uint8_t val) {
+    struct pmw3360_data *data = dev->data;
     const struct pmw3360_config *config = dev->config;
+
+    data->motion_burst_active = false;
 
     // Send the address and payload, read into a dummy buffer
     uint8_t tx_buffer[2] = {PMW3360_SPI_WRITE | addr, val};
@@ -130,9 +141,9 @@ static int pmw3360_spi_write(const struct device *dev, const uint8_t addr, const
         .count = 1,
     };
 
-    const int ret = spi_transceive_dt(&config->spi, &tx, &rx);
-    if (ret < 0) {
-        LOG_ERR("spi ret: %d", ret);
+    const int err = spi_transceive_dt(&config->spi, &tx, &rx);
+    if (err < 0) {
+        LOG_ERR("spi err: %d", err);
     }
 
     // Wait before releasing the NCS pin
@@ -143,7 +154,34 @@ static int pmw3360_spi_write(const struct device *dev, const uint8_t addr, const
     // Wait before we issue another read/write
     k_usleep(PMW3360_T_SWR);
 
-    return ret;
+    return err;
+}
+
+static int pmw3360_spi_read_reg(const struct device *dev, const uint8_t addr, uint8_t *val) {
+    int err = 0;
+    struct pmw3360_data *data = dev->data;
+
+    data->motion_burst_active = false;
+    
+    err = pmw3360_spi_read(dev, addr, val, 1, PMW3360_T_SRAD);
+    // Wait before we issue another read/write
+    k_usleep(PMW3360_T_SRR);
+    return err;
+}
+
+static int pmw3360_spi_read_motion_burst(const struct device *dev, uint8_t *val, const uint8_t len) {
+    int err = 0;
+    struct pmw3360_data *data = dev->data;
+
+    if (!data->motion_burst_active) {
+        // Write any value to the motion burst register to activate burst mode
+        pmw3360_spi_write_reg(dev, PMW3360_REG_MOTION_BURST, 0);
+        data->motion_burst_active = true;
+    }
+    err = pmw3360_spi_read(dev, PMW3360_REG_MOTION_BURST, val, len, PMW3360_T_SRAD_MOTBR);
+    // We cannot wait for the required 500ns, so settle for 1us
+    k_usleep(1);
+    return err;
 }
 
 static void pmw3360_gpio_callback(const struct device *gpiob, struct gpio_callback *cb, uint32_t pins) {
@@ -154,7 +192,7 @@ static void pmw3360_gpio_callback(const struct device *gpiob, struct gpio_callba
 }
 
 static int pmw3360_init_irq(const struct device *dev) {
-    int err;
+    int err = 0;
     struct pmw3360_data *data = dev->data;
     const struct pmw3360_config *config = dev->config;
 
@@ -189,24 +227,13 @@ static void pmw3360_work_callback(struct k_work *work) {
     struct pmw3360_data *data = CONTAINER_OF(work, struct pmw3360_data, trigger_work);
     const struct device *dev = data->dev;
 
-    uint8_t motion = 0;
-    pmw3360_spi_write(dev, PMW3360_REG_MOTION, 1);
-    pmw3360_spi_read(dev, PMW3360_REG_MOTION, &motion, 1);
+    struct motion_burst motion_report = {};
+    pmw3360_spi_read_motion_burst(dev, (uint8_t *) &motion_report, sizeof(motion_report));
 
-    uint8_t dx_l = 0;
-    uint8_t dx_h = 0;
-    pmw3360_spi_read(dev, PMW3360_REG_DELTA_X_L, &dx_l, 1);
-    pmw3360_spi_read(dev, PMW3360_REG_DELTA_X_H, &dx_h, 1);
-
-    int dx = (dx_h << 8) | dx_l;
+    const int32_t dx = (motion_report.delta_x_h << 8) | motion_report.delta_x_l;
     input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
 
-    uint8_t dy_l = 0;
-    uint8_t dy_h = 0;
-    pmw3360_spi_read(dev, PMW3360_REG_DELTA_Y_L, &dy_l, 1);
-    pmw3360_spi_read(dev, PMW3360_REG_DELTA_Y_H, &dy_h, 1);
-
-    int dy = (dy_h << 8) | dy_l;
+    const int32_t dy = (motion_report.delta_y_h << 8) | motion_report.delta_y_l;
     input_report_rel(dev, INPUT_REL_Y, dy, true, K_FOREVER);
 
     pmw3360_set_interrupt(dev, true);
@@ -228,7 +255,7 @@ static void pmw3360_async_init(struct k_work *work) {
     gpio_pin_set_dt(&config->cs_gpio, GPIO_OUTPUT_INACTIVE);
 
     // Step 3: write 0x5A to the Power_Up_Reset register
-    pmw3360_spi_write(dev, 0x3A, 0x5A);
+    pmw3360_spi_write_reg(dev, PMW3360_REG_POWER_UP, 0x5A);
 
     // Step 4: wait for at least 50ms
     k_msleep(50); 
@@ -236,31 +263,30 @@ static void pmw3360_async_init(struct k_work *work) {
     // Step 5: read the registers 2, 3, 4, 5 and 6
     for (int r=2; r<=6; r++) {
         uint8_t value = 0;
-        pmw3360_spi_read(dev, r, &value, 1);
+        pmw3360_spi_read_reg(dev, r, &value);
     }
 
     // Step 6: download the SROM. We will skip this.
     // Step 7: configure the sensor.
 
     uint8_t product_id = 0;
-    int r1 = pmw3360_spi_read(dev, PMW3360_REG_PRODUCT_ID, &product_id, 1);
+    int r1 = pmw3360_spi_read_reg(dev, PMW3360_REG_PRODUCT_ID, &product_id);
 
     uint8_t revision_id = 0;
-    int r2 = pmw3360_spi_read(dev, PMW3360_REG_REVISION_ID, &revision_id, 1);
+    int r2 = pmw3360_spi_read_reg(dev, PMW3360_REG_REVISION_ID, &revision_id);
 
     LOG_ERR("pmw3360 product %d (%d), resivion %d (%d)", product_id, r1, revision_id, r2);
 
-    pmw3360_spi_write(dev, PMW3360_REG_CONFIG_1, 0x07);
-    pmw3360_spi_write(dev, PMW3360_REG_CONFIG_2, 0x20);
-    pmw3360_spi_write(dev, PMW3360_REG_ANGLE_TUNE, 0x00);
-    pmw3360_spi_write(dev, PMW3360_REG_LIFT_CONFIG, 0x02);
+    pmw3360_spi_write_reg(dev, PMW3360_REG_CONFIG_1, 0x07);
+    pmw3360_spi_write_reg(dev, PMW3360_REG_CONFIG_2, 0x20);
+    pmw3360_spi_write_reg(dev, PMW3360_REG_ANGLE_TUNE, 0x00);
+    pmw3360_spi_write_reg(dev, PMW3360_REG_LIFT_CONFIG, 0x02);
 
     pmw3360_set_interrupt(dev, true);
 }
 
 static int pmw3360_init(const struct device *dev) {
     struct pmw3360_data *data = dev->data;
-    const struct pmw3360_config *config = dev->config;
     data->dev = dev;
 
     k_work_init_delayable(&data->init_work, pmw3360_async_init);

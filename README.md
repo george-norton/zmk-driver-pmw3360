@@ -7,4 +7,3 @@ This driver is a work in progress.
 - Configurable orientation
 - Configurable DPI
 - Polling mode
-- Burst motion report reads

@@ -12,6 +12,7 @@ extern "C" {
 struct pmw3360_data {
     const struct device *dev;
     bool ready;
+    bool motion_burst_active;
     struct k_work trigger_work;
     struct k_work_delayable init_work;
     struct gpio_callback irq_gpio_cb; // motion pin irq callback
