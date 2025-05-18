@@ -14,43 +14,6 @@
 
 LOG_MODULE_REGISTER(pmw3360, CONFIG_INPUT_LOG_LEVEL);
 
-// Indicates the direction of a SPI transaction
-#define PMW3360_SPI_READ 0
-#define PMW3360_SPI_WRITE 0x80
-
-// Timing values from the datasheet
-#define PMW3360_T_SRAD 160
-#define PMW3360_T_SCLK_NCS_READ 120
-#define PMW3360_T_SCLK_NCS_WRITE 35
-#define PMW3360_T_SRR 20  // Same as T_SRW
-#define PMW3360_T_SWR 180 // Same as T_SWW
-#define PMW3360_T_SRAD_MOTBR 35
-
-// Select register addresses
-#define PMW3360_REG_PRODUCT_ID      0x00
-#define PMW3360_REG_REVISION_ID     0x01
-#define PMW3360_REG_MOTION          0x02
-#define PMW3360_REG_DELTA_X_L       0x03
-#define PMW3360_REG_DELTA_X_H       0x04
-#define PMW3360_REG_DELTA_Y_L       0x05
-#define PMW3360_REG_DELTA_Y_H       0x06
-
-#define PMW3360_REG_CONFIG_1        0x0F
-#define PMW3360_REG_CONFIG_2        0x10
-#define PMW3360_REG_ANGLE_TUNE      0x11
-#define PMW3360_REG_POWER_UP        0x3A
-#define PMW3360_REG_MOTION_BURST    0x50
-#define PMW3360_REG_LIFT_CONFIG     0x63
-
-struct motion_burst {
-    uint8_t motion;
-    uint8_t observation;
-    uint8_t delta_x_l;
-    uint8_t delta_x_h;
-    uint8_t delta_y_l;
-    uint8_t delta_y_h;
-} __packed;
-
 static int pmw3360_set_interrupt(const struct device *dev, const bool en) {
     const struct pmw3360_config *config = dev->config;
     int err = gpio_pin_interrupt_configure_dt(&config->irq_gpio,
@@ -223,19 +186,23 @@ static int pmw3360_init_irq(const struct device *dev) {
     return err;
 }
 
-static void pmw3360_work_callback(struct k_work *work) {
-    struct pmw3360_data *data = CONTAINER_OF(work, struct pmw3360_data, trigger_work);
-    const struct device *dev = data->dev;
-
+static void pmw3360_read_motion_report(const struct device *dev) {
     struct motion_burst motion_report = {};
     pmw3360_spi_read_motion_burst(dev, (uint8_t *) &motion_report, sizeof(motion_report));
 
-    const int32_t dx = (motion_report.delta_x_h << 8) | motion_report.delta_x_l;
-    input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
+    if (motion_report.motion & PMW3360_MOTION_MOT) {
+        const int32_t dx = (motion_report.delta_x_h << 8) | motion_report.delta_x_l;
+        input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
 
-    const int32_t dy = (motion_report.delta_y_h << 8) | motion_report.delta_y_l;
-    input_report_rel(dev, INPUT_REL_Y, dy, true, K_FOREVER);
+        const int32_t dy = (motion_report.delta_y_h << 8) | motion_report.delta_y_l;
+        input_report_rel(dev, INPUT_REL_Y, dy, true, K_FOREVER);
+    }
+}
 
+static void pmw3360_work_callback(struct k_work *work) {
+    struct pmw3360_data *data = CONTAINER_OF(work, struct pmw3360_data, trigger_work);
+    const struct device *dev = data->dev;
+    pmw3360_read_motion_report(dev);
     pmw3360_set_interrupt(dev, true);
 }
 
@@ -269,18 +236,49 @@ static void pmw3360_async_init(struct k_work *work) {
     // Step 6: download the SROM. We will skip this.
     // Step 7: configure the sensor.
 
+
+    // Log the sensor product and revision ID. We expect 0x66, 0x01
     uint8_t product_id = 0;
     int r1 = pmw3360_spi_read_reg(dev, PMW3360_REG_PRODUCT_ID, &product_id);
 
     uint8_t revision_id = 0;
     int r2 = pmw3360_spi_read_reg(dev, PMW3360_REG_REVISION_ID, &revision_id);
 
-    LOG_ERR("pmw3360 product %d (%d), resivion %d (%d)", product_id, r1, revision_id, r2);
+    LOG_DBG("pmw3360 product %d (%d), resivion %d (%d)", product_id, r1, revision_id, r2);
 
-    pmw3360_spi_write_reg(dev, PMW3360_REG_CONFIG_1, 0x07);
-    pmw3360_spi_write_reg(dev, PMW3360_REG_CONFIG_2, 0x20);
-    pmw3360_spi_write_reg(dev, PMW3360_REG_ANGLE_TUNE, 0x00);
-    pmw3360_spi_write_reg(dev, PMW3360_REG_LIFT_CONFIG, 0x02);
+    // Configure the sensor orientation
+    if (config->rotate_90) {
+        if (config->rotate_180 || config->rotate_270) {
+            LOG_ERR("Multiple rotations specified, configuring 90 degrees.");
+        }
+        pmw3360_spi_write_reg(dev, PMW3360_REG_CONTROL, PMW3360_CONTROL_ROTATE_90);
+    }
+    else if (config->rotate_180) {
+        if (config->rotate_270) {
+            LOG_ERR("Multiple rotations specified, configuring 180 degrees.");
+
+        }
+        pmw3360_spi_write_reg(dev, PMW3360_REG_CONTROL, PMW3360_CONTROL_ROTATE_180);
+    }
+    else if (config->rotate_270) {
+        pmw3360_spi_write_reg(dev, PMW3360_REG_CONTROL, PMW3360_CONTROL_ROTATE_270);
+    }
+
+    // Configure the default CPI
+    pmw3360_spi_write_reg(dev, PMW3360_REG_CONFIG_1, (config->cpi / 100) - 1);
+
+    // We always enable rest mode to save a bit of power, but probably this is a
+    // wired device so it could be turned off.
+    pmw3360_spi_write_reg(dev, PMW3360_REG_CONFIG_2, PWM3360_CONFIG_2_REST_EN);
+
+    // Allow extra control over the sensor orientation
+    pmw3360_spi_write_reg(dev, PMW3360_REG_ANGLE_TUNE, config->angle_tune);
+
+    // There are only 2 allowed lift off values, 2mm and 3mm.
+    if (config->lift_height_3mm)
+    {
+        pmw3360_spi_write_reg(dev, PMW3360_REG_LIFT_CONFIG, 0x03);
+    }
 
     pmw3360_set_interrupt(dev, true);
 }
@@ -324,6 +322,11 @@ static const struct sensor_driver_api pmw3360_driver_api = {
         .cs_gpio = SPI_CS_GPIOS_DT_SPEC_GET(DT_DRV_INST(n)),                                       \
         .irq_gpio = GPIO_DT_SPEC_INST_GET(n, irq_gpios),                                           \
         .cpi = DT_PROP(DT_DRV_INST(n), cpi),                                                       \
+        .rotate_90 = DT_PROP(DT_DRV_INST(n), rotate_90),                                           \
+        .rotate_180 = DT_PROP(DT_DRV_INST(n), rotate_180),                                         \
+        .rotate_270 = DT_PROP(DT_DRV_INST(n), rotate_270),                                         \
+        .angle_tune = DT_PROP(DT_DRV_INST(n), angle_tune),                                         \
+        .lift_height_3mm = DT_PROP(DT_DRV_INST(n), lift_height_3mm),                               \
     };                                                                                             \
     DEVICE_DT_INST_DEFINE(n, pmw3360_init, NULL, &data##n, &config##n, POST_KERNEL,                \
         CONFIG_INPUT_INIT_PRIORITY, &pmw3360_driver_api);

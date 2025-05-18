@@ -15,3 +15,19 @@ properties:
     type: int
     default: 600
     description: "CPI value (Range: 50 - 8200)"
+  rotate-90:
+    type: boolean
+    description: "The sensor is installed rotated 90 degrees. Rotation properties are mutually exclusive."
+  rotate-180:
+    type: boolean
+    description: "The sensor is installed rotated 180 degrees. Rotation properties are mutually exclusive."
+  rotate-270:
+    type: boolean
+    description: "The sensor is installed rotated 270 degrees. Rotation properties are mutually exclusive."
+  angle-tune:
+    type: int
+    default: 0 
+    description: "Adjust the sensor angle in degrees (Range: -30 - 30)."
+  lift-height-3mm:
+    type: boolean
+    description: "Configure the lift-off height to be 3mm rather than the default 2mm."
