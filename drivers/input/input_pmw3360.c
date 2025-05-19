@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025 The ZMK Contributors
+ * Copyright (c) 2025 George Norton
  *
  * SPDX-License-Identifier: MIT
  */
@@ -10,6 +10,7 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/input/input.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
 #include "input_pmw3360.h"
 
 LOG_MODULE_REGISTER(pmw3360, CONFIG_INPUT_LOG_LEVEL);
@@ -17,9 +18,9 @@ LOG_MODULE_REGISTER(pmw3360, CONFIG_INPUT_LOG_LEVEL);
 static int pmw3360_set_interrupt(const struct device *dev, const bool en) {
     const struct pmw3360_config *config = dev->config;
     int err = gpio_pin_interrupt_configure_dt(&config->irq_gpio,
-                                              en ? GPIO_INT_LEVEL_ACTIVE : GPIO_INT_DISABLE);
+                                                en ? GPIO_INT_LEVEL_ACTIVE : GPIO_INT_DISABLE);
     if (err < 0) {
-        LOG_ERR("can't set interrupt");
+        LOG_ERR("Can't set interrupt");
     }
     return err;
 }
@@ -151,7 +152,7 @@ static void pmw3360_gpio_callback(const struct device *gpiob, struct gpio_callba
     struct pmw3360_data *data = CONTAINER_OF(cb, struct pmw3360_data, irq_gpio_cb);
     const struct device *dev = data->dev;
     pmw3360_set_interrupt(dev, false);
-    k_work_submit(&data->trigger_work);
+    k_work_submit(&data->motion_work);
 }
 
 static int pmw3360_init_irq(const struct device *dev) {
@@ -200,10 +201,23 @@ static void pmw3360_read_motion_report(const struct device *dev) {
 }
 
 static void pmw3360_work_callback(struct k_work *work) {
-    struct pmw3360_data *data = CONTAINER_OF(work, struct pmw3360_data, trigger_work);
+    struct pmw3360_data *data = CONTAINER_OF(work, struct pmw3360_data, motion_work);
     const struct device *dev = data->dev;
     pmw3360_read_motion_report(dev);
-    pmw3360_set_interrupt(dev, true);
+
+    if (data->polling_mode) {
+        const struct pmw3360_config *config = dev->config;
+        struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+        uint32_t current_cycles = k_cycle_get_32();
+        uint32_t cycles_diff = current_cycles - data->last_poll_cycles;
+        uint32_t delay = config->polling_interval - CLAMP(k_cyc_to_us_floor32(cycles_diff), 0, config->polling_interval);
+
+        data->last_poll_cycles = current_cycles;
+        k_work_reschedule(dwork, K_USEC(delay));
+    }
+    else {
+        pmw3360_set_interrupt(dev, true);
+    }
 }
 
 static void pmw3360_async_init(struct k_work *work) {
@@ -211,9 +225,12 @@ static void pmw3360_async_init(struct k_work *work) {
     struct pmw3360_data *data = CONTAINER_OF(work_delayable, struct pmw3360_data, init_work);
     const struct device *dev = data->dev;
     const struct pmw3360_config *config = dev->config;
-
-    k_work_init(&data->trigger_work, pmw3360_work_callback);
-    pmw3360_init_irq(dev);
+    
+    k_work_init(&data->motion_work, pmw3360_work_callback);
+    if(pmw3360_init_irq(dev) < 0) {
+        LOG_INF("Starting in polling mode.");
+        data->polling_mode = true;
+    }
 
     // Power up sequence.
     // Step 2: drive the NCS high, then low to reset the SPI port.
@@ -235,7 +252,6 @@ static void pmw3360_async_init(struct k_work *work) {
 
     // Step 6: download the SROM. We will skip this.
     // Step 7: configure the sensor.
-
 
     // Log the sensor product and revision ID. We expect 0x66, 0x01
     uint8_t product_id = 0;
@@ -275,12 +291,20 @@ static void pmw3360_async_init(struct k_work *work) {
     pmw3360_spi_write_reg(dev, PMW3360_REG_ANGLE_TUNE, config->angle_tune);
 
     // There are only 2 allowed lift off values, 2mm and 3mm.
-    if (config->lift_height_3mm)
-    {
-        pmw3360_spi_write_reg(dev, PMW3360_REG_LIFT_CONFIG, 0x03);
+    if (config->lift_height_3mm) {
+        pmw3360_spi_write_reg(dev, PMW3360_REG_LIFT_CONFIG, PMW3360_LIFT_CONFIG_3MM);
     }
 
-    pmw3360_set_interrupt(dev, true);
+    if (data->polling_mode) {
+        struct k_work_delayable *dwork = k_work_delayable_from_work(&data->motion_work);
+        data->last_poll_cycles = k_cycle_get_32();
+        k_work_reschedule(dwork, K_USEC(config->polling_interval));
+    }
+    else {
+        pmw3360_set_interrupt(dev, true);
+    }
+
+    data->ready = true;
 }
 
 static int pmw3360_init(const struct device *dev) {
@@ -296,6 +320,7 @@ static int pmw3360_init(const struct device *dev) {
 
 static int pmw3360_attr_set(const struct device *dev, enum sensor_channel chan, enum sensor_attribute attr, const struct sensor_value *val) {
     struct pmw3360_data *data = dev->data;
+    int err = 0;
 
     if (unlikely(chan != SENSOR_CHAN_ALL)) {
         return -ENOTSUP;
@@ -306,7 +331,16 @@ static int pmw3360_attr_set(const struct device *dev, enum sensor_channel chan, 
         return -EBUSY;
     }
 
-    return 0;
+    switch((int32_t) attr) {
+        case PMW3360_ATTR_CPI:
+            pmw3360_spi_write_reg(dev, PMW3360_REG_CONFIG_1, ((uint32_t) (val->val1) / 100) - 1);
+            break;
+        default:
+            LOG_ERR("Unknown attribute");
+            err = -ENOTSUP;
+    }
+
+    return err;
 }
 
 static const struct sensor_driver_api pmw3360_driver_api = {
@@ -320,13 +354,14 @@ static const struct sensor_driver_api pmw3360_driver_api = {
     static const struct pmw3360_config config##n = {                                               \
         .spi = SPI_DT_SPEC_INST_GET(n, PMW3360_SPI_MODE, 0),                                       \
         .cs_gpio = SPI_CS_GPIOS_DT_SPEC_GET(DT_DRV_INST(n)),                                       \
-        .irq_gpio = GPIO_DT_SPEC_INST_GET(n, irq_gpios),                                           \
+        .irq_gpio = GPIO_DT_SPEC_GET_OR(DT_DRV_INST(n), irq_gpios, {}),                            \
         .cpi = DT_PROP(DT_DRV_INST(n), cpi),                                                       \
         .rotate_90 = DT_PROP(DT_DRV_INST(n), rotate_90),                                           \
         .rotate_180 = DT_PROP(DT_DRV_INST(n), rotate_180),                                         \
         .rotate_270 = DT_PROP(DT_DRV_INST(n), rotate_270),                                         \
         .angle_tune = DT_PROP(DT_DRV_INST(n), angle_tune),                                         \
         .lift_height_3mm = DT_PROP(DT_DRV_INST(n), lift_height_3mm),                               \
+        .polling_interval = DT_PROP(DT_DRV_INST(n), polling_interval),                             \
     };                                                                                             \
     DEVICE_DT_INST_DEFINE(n, pmw3360_init, NULL, &data##n, &config##n, POST_KERNEL,                \
         CONFIG_INPUT_INIT_PRIORITY, &pmw3360_driver_api);

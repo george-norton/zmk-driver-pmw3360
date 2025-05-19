@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2025 George Norton
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
 #pragma once
 
 #include <zephyr/device.h>
@@ -43,6 +49,13 @@ extern "C" {
 #define PMW3360_REG_POWER_UP            0x3A
 #define PMW3360_REG_MOTION_BURST        0x50
 #define PMW3360_REG_LIFT_CONFIG         0x63
+#   define PMW3360_LIFT_CONFIG_2MM      0x02
+#   define PMW3360_LIFT_CONFIG_3MM      0x03
+
+// Runtime configurable attributes
+enum pmw3360_attributes {
+    PMW3360_ATTR_CPI
+};
 
 // The motion burst report, this can be exteneded to read more
 // data, but we dont use it, so we dont bother reading it.
@@ -60,7 +73,9 @@ struct pmw3360_data {
     const struct device *dev;
     bool ready;
     bool motion_burst_active;
-    struct k_work trigger_work;
+    bool polling_mode;
+    uint32_t last_poll_cycles;
+    struct k_work motion_work;
     struct k_work_delayable init_work;
     struct gpio_callback irq_gpio_cb; // motion pin irq callback
 };
@@ -76,6 +91,7 @@ struct pmw3360_config {
     bool rotate_270;
     int8_t angle_tune;
     bool lift_height_3mm;
+    uint32_t polling_interval;
 };
 
 #ifdef __cplusplus

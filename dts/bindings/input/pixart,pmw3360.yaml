@@ -10,7 +10,6 @@ include: spi-device.yaml
 properties:
   irq-gpios:
     type: phandle-array
-    required: true
   cpi:
     type: int
     default: 600
@@ -31,3 +30,7 @@ properties:
   lift-height-3mm:
     type: boolean
     description: "Configure the lift-off height to be 3mm rather than the default 2mm."
+  polling-interval:
+    type: int
+    default: 1000 
+    description: "The time, in microseconds, to wait between sensor polls when operating without an irq configured."
