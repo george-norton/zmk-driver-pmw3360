@@ -12,3 +12,17 @@ menuconfig INPUT_PIXART_PMW3360
     depends on DT_HAS_PIXART_PMW3360_ENABLED
     help
       Enable PMW3360 optical mouse sensor.
+
+config INPUT_PIXART_PMW3360_USE_OWN_THREAD
+    bool "Create a thread for the PMW3360 driver."
+    default y
+
+config INPUT_PIXART_PMW3360_THREAD_PRIORITY
+    int "The priority of the PWM3360 driver thread."
+    depends on INPUT_PIXART_PMW3360_USE_OWN_THREAD
+    default 5
+
+config INPUT_PIXART_PMW3360_THREAD_STACK_SIZE
+    int "The stack size of the PWM3360 driver thread."
+    depends on INPUT_PIXART_PMW3360_USE_OWN_THREAD
+    default 768

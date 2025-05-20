@@ -75,6 +75,9 @@ struct pmw3360_data {
     bool motion_burst_active;
     bool polling_mode;
     uint32_t last_poll_cycles;
+#if defined(CONFIG_INPUT_PIXART_PMW3360_USE_OWN_THREAD)
+    struct k_work_q driver_work_queue;
+#endif
     struct k_work motion_work;
     struct k_work_delayable init_work;
     struct gpio_callback irq_gpio_cb; // motion pin irq callback

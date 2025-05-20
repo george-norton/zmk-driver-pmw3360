@@ -15,6 +15,10 @@
 
 LOG_MODULE_REGISTER(pmw3360, CONFIG_INPUT_LOG_LEVEL);
 
+#if defined(CONFIG_INPUT_PIXART_PMW3360_USE_OWN_THREAD)
+    K_THREAD_STACK_DEFINE(pmw3360_stack, CONFIG_INPUT_PIXART_PMW3360_THREAD_STACK_SIZE);
+#endif
+
 static int pmw3360_set_interrupt(const struct device *dev, const bool en) {
     const struct pmw3360_config *config = dev->config;
     int err = gpio_pin_interrupt_configure_dt(&config->irq_gpio,
@@ -152,7 +156,11 @@ static void pmw3360_gpio_callback(const struct device *gpiob, struct gpio_callba
     struct pmw3360_data *data = CONTAINER_OF(cb, struct pmw3360_data, irq_gpio_cb);
     const struct device *dev = data->dev;
     pmw3360_set_interrupt(dev, false);
+#if defined(CONFIG_INPUT_PIXART_PMW3360_USE_OWN_THREAD)
+    k_work_submit_to_queue(&data->driver_work_queue, &data->motion_work);
+#else
     k_work_submit(&data->motion_work);
+#endif
 }
 
 static int pmw3360_init_irq(const struct device *dev) {
@@ -213,7 +221,11 @@ static void pmw3360_work_callback(struct k_work *work) {
         uint32_t delay = config->polling_interval - CLAMP(k_cyc_to_us_floor32(cycles_diff), 0, config->polling_interval);
 
         data->last_poll_cycles = current_cycles;
+#if defined(CONFIG_INPUT_PIXART_PMW3360_USE_OWN_THREAD)
+        k_work_reschedule_for_queue(&data->driver_work_queue, dwork, K_USEC(delay));
+#else
         k_work_reschedule(dwork, K_USEC(delay));
+#endif
     }
     else {
         pmw3360_set_interrupt(dev, true);
@@ -225,7 +237,16 @@ static void pmw3360_async_init(struct k_work *work) {
     struct pmw3360_data *data = CONTAINER_OF(work_delayable, struct pmw3360_data, init_work);
     const struct device *dev = data->dev;
     const struct pmw3360_config *config = dev->config;
-    
+
+
+#if defined(CONFIG_INPUT_PIXART_PMW3360_USE_OWN_THREAD)
+    k_work_queue_init(&data->driver_work_queue);
+
+    k_work_queue_start(&data->driver_work_queue, pmw3360_stack,
+                       K_THREAD_STACK_SIZEOF(pmw3360_stack),
+                       CONFIG_INPUT_PIXART_PMW3360_THREAD_PRIORITY,
+                       NULL);
+#endif
     k_work_init(&data->motion_work, pmw3360_work_callback);
     if(pmw3360_init_irq(dev) < 0) {
         LOG_INF("Starting in polling mode.");
@@ -298,7 +319,11 @@ static void pmw3360_async_init(struct k_work *work) {
     if (data->polling_mode) {
         struct k_work_delayable *dwork = k_work_delayable_from_work(&data->motion_work);
         data->last_poll_cycles = k_cycle_get_32();
+#if defined(CONFIG_INPUT_PIXART_PMW3360_USE_OWN_THREAD)
+        k_work_reschedule_for_queue(&data->driver_work_queue, dwork, K_USEC(config->polling_interval));
+#else
         k_work_reschedule(dwork, K_USEC(config->polling_interval));
+#endif
     }
     else {
         pmw3360_set_interrupt(dev, true);
