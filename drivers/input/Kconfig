@@ -6,8 +6,8 @@
 menuconfig INPUT_PIXART_PMW3360
     bool "PMW3360 optical mouse sensor"
     default y
-    depends on GPIO
-    depends on SPI
+    select GPIO
+    select SPI
     depends on INPUT
     depends on DT_HAS_PIXART_PMW3360_ENABLED
     help
