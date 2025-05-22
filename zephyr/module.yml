@@ -1,5 +1,5 @@
 
-name: pmw3360-zephyr-module
+name: zmk-driver-pmw3360
 build:
   cmake: .
   kconfig: Kconfig
