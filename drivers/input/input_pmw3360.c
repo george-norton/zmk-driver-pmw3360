@@ -283,6 +283,8 @@ static void pmw3360_async_init(struct k_work *work) {
 
     LOG_DBG("pmw3360 product %d (%d), resivion %d (%d)", product_id, r1, revision_id, r2);
 
+    k_mutex_lock(&data->mutex, K_FOREVER);
+
     // Configure the sensor orientation
     if (config->rotate_90) {
         if (config->rotate_180 || config->rotate_270) {
@@ -301,8 +303,9 @@ static void pmw3360_async_init(struct k_work *work) {
         pmw3360_spi_write_reg(dev, PMW3360_REG_CONTROL, PMW3360_CONTROL_ROTATE_270);
     }
 
-    // Configure the default CPI
-    pmw3360_spi_write_reg(dev, PMW3360_REG_CONFIG_1, (config->cpi / 100) - 1);
+    // Configure the CPI, this may be been overriden by a call to set_attr
+    uint16_t cpi = data->cpi ? data->cpi : config->cpi;
+    pmw3360_spi_write_reg(dev, PMW3360_REG_CONFIG_1, (cpi / 100) - 1);
 
     // We always enable rest mode to save a bit of power, but probably this is a
     // wired device so it could be turned off.
@@ -315,6 +318,9 @@ static void pmw3360_async_init(struct k_work *work) {
     if (config->lift_height_3mm) {
         pmw3360_spi_write_reg(dev, PMW3360_REG_LIFT_CONFIG, PMW3360_LIFT_CONFIG_3MM);
     }
+
+    data->ready = true;
+    k_mutex_unlock(&data->mutex);
 
     if (data->polling_mode) {
         struct k_work_delayable *dwork = k_work_delayable_from_work(&data->motion_work);
@@ -329,12 +335,12 @@ static void pmw3360_async_init(struct k_work *work) {
         pmw3360_set_interrupt(dev, true);
     }
 
-    data->ready = true;
 }
 
 static int pmw3360_init(const struct device *dev) {
     struct pmw3360_data *data = dev->data;
     data->dev = dev;
+    k_mutex_init(&data->mutex);
 
     k_work_init_delayable(&data->init_work, pmw3360_async_init);
     // How much delay do we need? K_NO_WAIT ? Some delay seems required or we dont get logging.
@@ -350,20 +356,23 @@ static int pmw3360_attr_set(const struct device *dev, enum sensor_channel chan, 
     if (unlikely(chan != SENSOR_CHAN_ALL)) {
         return -ENOTSUP;
     }
-
-    if (unlikely(!data->ready)) {
-        LOG_ERR("Device is not initialized yet");
-        return -EBUSY;
-    }
-
+    k_mutex_lock(&data->mutex, K_FOREVER);
     switch((int32_t) attr) {
         case PMW3360_ATTR_CPI:
-            pmw3360_spi_write_reg(dev, PMW3360_REG_CONFIG_1, ((uint32_t) (val->val1) / 100) - 1);
+            if (unlikely(!data->ready)) {
+                LOG_INF("Set CPI before the device is initialized");
+                // We will pickup the new cpi value during initialization.
+                data->cpi = val->val1;
+            }
+            else {
+                pmw3360_spi_write_reg(dev, PMW3360_REG_CONFIG_1, ((uint32_t) (val->val1) / 100) - 1);
+            }
             break;
         default:
             LOG_ERR("Unknown attribute");
             err = -ENOTSUP;
     }
+    k_mutex_unlock(&data->mutex);
 
     return err;
 }
@@ -375,7 +384,7 @@ static const struct sensor_driver_api pmw3360_driver_api = {
 #define PMW3360_SPI_MODE (SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_TRANSFER_MSB | SPI_HOLD_ON_CS | SPI_LOCK_ON)
 
 #define PMW3360_DEFINE(n)                                                                          \
-    static struct pmw3360_data data##n;                                                            \
+    static struct pmw3360_data data##n = {};                                                       \
     static const struct pmw3360_config config##n = {                                               \
         .spi = SPI_DT_SPEC_INST_GET(n, PMW3360_SPI_MODE, 0),                                       \
         .cs_gpio = SPI_CS_GPIOS_DT_SPEC_GET(DT_DRV_INST(n)),                                       \

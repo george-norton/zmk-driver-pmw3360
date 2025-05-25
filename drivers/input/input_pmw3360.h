@@ -71,7 +71,9 @@ struct motion_burst {
 // The drivers private data
 struct pmw3360_data {
     const struct device *dev;
+    struct k_mutex mutex; // Prevent set_attr from changing things while we are initializing
     bool ready;
+    uint16_t cpi;
     bool motion_burst_active;
     bool polling_mode;
     uint32_t last_poll_cycles;
