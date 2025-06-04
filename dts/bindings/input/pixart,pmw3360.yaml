@@ -10,6 +10,7 @@ include: spi-device.yaml
 properties:
   irq-gpios:
     type: phandle-array
+    description: "The GPIO which has the motion pin wired to it. If not specified, the device will be polled instead."
   cpi:
     type: int
     default: 600
