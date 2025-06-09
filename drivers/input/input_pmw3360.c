@@ -130,7 +130,7 @@ static int pmw3360_spi_read_reg(const struct device *dev, const uint8_t addr, ui
     struct pmw3360_data *data = dev->data;
 
     data->motion_burst_active = false;
-    
+
     err = pmw3360_spi_read(dev, addr, val, 1, PMW3360_T_SRAD);
     // Wait before we issue another read/write
     k_usleep(PMW3360_T_SRR);
@@ -197,13 +197,19 @@ static int pmw3360_init_irq(const struct device *dev) {
 
 static void pmw3360_read_motion_report(const struct device *dev) {
     struct motion_burst motion_report = {};
-    pmw3360_spi_read_motion_burst(dev, (uint8_t *) &motion_report, sizeof(motion_report));
+    int err = pmw3360_spi_read_motion_burst(dev, (uint8_t *) &motion_report, sizeof(motion_report));
+    if ((err != 0) || (motion_report.motion == 0xff)) {
+        // If burst most became deactivated for some reason, reactivate it.
+        // We see this sometimes if there is a second device on the SPI bus.
+        struct pmw3360_data *data = dev->data;
+        data->motion_burst_active = false;
+        pmw3360_spi_read_motion_burst(dev, (uint8_t *) &motion_report, sizeof(motion_report));
+    }
 
     if (motion_report.motion & PMW3360_MOTION_MOT) {
-        const int32_t dx = (motion_report.delta_x_h << 8) | motion_report.delta_x_l;
+        const int16_t dx = (motion_report.delta_x_h << 8) | motion_report.delta_x_l;
         input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
-
-        const int32_t dy = (motion_report.delta_y_h << 8) | motion_report.delta_y_l;
+        const int16_t dy = (motion_report.delta_y_h << 8) | motion_report.delta_y_l;
         input_report_rel(dev, INPUT_REL_Y, dy, true, K_FOREVER);
     }
 }

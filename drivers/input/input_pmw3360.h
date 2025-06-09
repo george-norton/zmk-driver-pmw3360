@@ -66,6 +66,12 @@ struct motion_burst {
     uint8_t delta_x_h;
     uint8_t delta_y_l;
     uint8_t delta_y_h;
+/*  uint8_t squal;
+    uint8_t raw_data_sum;
+    uint8_t maximum_raw_data;
+    uint8_t minimum_raw_data;
+    uint8_t shutter_upper;
+    uint8_t shutter_lower; */
 } __packed;
 
 // The drivers private data
