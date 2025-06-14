@@ -196,6 +196,7 @@ static int pmw3360_init_irq(const struct device *dev) {
 }
 
 static void pmw3360_read_motion_report(const struct device *dev) {
+    const struct pmw3360_config *config = dev->config;
     struct motion_burst motion_report = {};
     int err = pmw3360_spi_read_motion_burst(dev, (uint8_t *) &motion_report, sizeof(motion_report));
     if ((err != 0) || (motion_report.motion == 0xff)) {
