@@ -208,12 +208,12 @@ static void pmw3360_read_motion_report(const struct device *dev) {
     }
 
     if (motion_report.motion & PMW3360_MOTION_MOT) {
-        const int16_t dx = (motion_report.delta_x_h << 8) | motion_report.delta_x_l;
+        int16_t dx = (motion_report.delta_x_h << 8) | motion_report.delta_x_l;
         if (config->invert_x) {
             dx = -dx;
         }
         input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
-        const int16_t dy = (motion_report.delta_y_h << 8) | motion_report.delta_y_l;
+        int16_t dy = (motion_report.delta_y_h << 8) | motion_report.delta_y_l;
         if (config->invert_y) {
             dy = -dy;
         }
