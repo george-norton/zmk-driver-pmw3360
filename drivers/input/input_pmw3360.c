@@ -196,6 +196,7 @@ static int pmw3360_init_irq(const struct device *dev) {
 }
 
 static void pmw3360_read_motion_report(const struct device *dev) {
+    const struct pmw3360_config *config = dev->config;
     struct motion_burst motion_report = {};
     int err = pmw3360_spi_read_motion_burst(dev, (uint8_t *) &motion_report, sizeof(motion_report));
     if ((err != 0) || (motion_report.motion == 0xff)) {
@@ -207,9 +208,15 @@ static void pmw3360_read_motion_report(const struct device *dev) {
     }
 
     if (motion_report.motion & PMW3360_MOTION_MOT) {
-        const int16_t dx = (motion_report.delta_x_h << 8) | motion_report.delta_x_l;
+        int16_t dx = (motion_report.delta_x_h << 8) | motion_report.delta_x_l;
+        if (config->invert_x) {
+            dx = -dx;
+        }
         input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
-        const int16_t dy = (motion_report.delta_y_h << 8) | motion_report.delta_y_l;
+        int16_t dy = (motion_report.delta_y_h << 8) | motion_report.delta_y_l;
+        if (config->invert_y) {
+            dy = -dy;
+        }
         input_report_rel(dev, INPUT_REL_Y, dy, true, K_FOREVER);
     }
 }
@@ -402,6 +409,8 @@ static const struct sensor_driver_api pmw3360_driver_api = {
         .angle_tune = DT_PROP(DT_DRV_INST(n), angle_tune),                                         \
         .lift_height_3mm = DT_PROP(DT_DRV_INST(n), lift_height_3mm),                               \
         .polling_interval = DT_PROP(DT_DRV_INST(n), polling_interval),                             \
+        .invert_x = DT_PROP(DT_DRV_INST(n), invert_x),                                             \
+        .invert_y = DT_PROP(DT_DRV_INST(n), invert_y),                                             \
     };                                                                                             \
     DEVICE_DT_INST_DEFINE(n, pmw3360_init, NULL, &data##n, &config##n, POST_KERNEL,                \
         CONFIG_INPUT_INIT_PRIORITY, &pmw3360_driver_api);
