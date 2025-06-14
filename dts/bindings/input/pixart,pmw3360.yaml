@@ -37,11 +37,9 @@ properties:
     description: "The time, in microseconds, to wait between sensor polls when operating without an irq configured."
   invert-x:
     type: boolean
-    default: false
     description:
       "If true, invert the X axis."
   invert-y:
     type: boolean
-    default: false
     description:
       "If true, invert the Y axis."
