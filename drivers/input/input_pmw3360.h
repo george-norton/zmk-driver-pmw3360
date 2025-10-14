@@ -96,6 +96,7 @@ struct pmw3360_config {
     struct spi_dt_spec spi;
     struct gpio_dt_spec cs_gpio;
     struct gpio_dt_spec irq_gpio;
+    struct gpio_dt_spec reset_gpio;
     uint16_t cpi;
     bool rotate_90;
     bool rotate_180;

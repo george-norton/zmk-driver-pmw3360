@@ -352,12 +352,24 @@ static void pmw3360_async_init(struct k_work *work) {
 
 static int pmw3360_init(const struct device *dev) {
     struct pmw3360_data *data = dev->data;
+    const struct pmw3360_config *config = dev->config;
     data->dev = dev;
     k_mutex_init(&data->mutex);
 
     k_work_init_delayable(&data->init_work, pmw3360_async_init);
     // How much delay do we need? K_NO_WAIT ? Some delay seems required or we dont get logging.
     k_work_schedule(&data->init_work, K_MSEC(1000));
+
+    // If we have a reset pin configured, pull it down.
+    if (config->reset_gpio.port)
+    {
+        int err = gpio_pin_configure_dt(&config->reset_gpio, GPIO_OUTPUT);
+        if (err) {
+            LOG_ERR("Cannot configure Reset GPIO");
+            return err;
+        }
+        gpio_pin_set_dt(&config->reset_gpio, 0);
+    }
 
     return 0;
 }
@@ -402,6 +414,7 @@ static const struct sensor_driver_api pmw3360_driver_api = {
         .spi = SPI_DT_SPEC_INST_GET(n, PMW3360_SPI_MODE, 0),                                       \
         .cs_gpio = SPI_CS_GPIOS_DT_SPEC_GET(DT_DRV_INST(n)),                                       \
         .irq_gpio = GPIO_DT_SPEC_GET_OR(DT_DRV_INST(n), irq_gpios, {}),                            \
+        .reset_gpio = GPIO_DT_SPEC_GET_OR(DT_DRV_INST(n), reset_gpios, {}),                        \
         .cpi = DT_PROP(DT_DRV_INST(n), cpi),                                                       \
         .rotate_90 = DT_PROP(DT_DRV_INST(n), rotate_90),                                           \
         .rotate_180 = DT_PROP(DT_DRV_INST(n), rotate_180),                                         \
